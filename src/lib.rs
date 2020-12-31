@@ -1,3 +1,5 @@
+#![feature(trait_alias)]
+
 use bevy::{
     ecs::{Schedule, Stage, ShouldRun},
     prelude::{
@@ -6,6 +8,8 @@ use bevy::{
     },
 };
 use std::sync::Mutex;
+use std::ops::DerefMut;
+use std::collections::hash_map::*;
 
 pub mod stage{
     pub const ROLLBACK_UPDATE: &str = "rollback_update";
@@ -69,6 +73,8 @@ impl RollbackStage{
             match current_state{
                 RollbackState::Rollback(state) => {
                     // Perform initial rollback
+                    // Despawn current rollback scene
+                    // Spawn new rollback scene
                     
                     // Setup for catchup
                     resources
@@ -77,6 +83,19 @@ impl RollbackStage{
                         .rollback_state = RollbackState::Rolledback(state);
                 },
                 RollbackState::Rolledback(state) => {
+                    // Apply buffered changes for state
+                    let changes = resources
+                        .get_mut::<RollbackBuffer>()
+                        .expect("Couldn't find RollbackBuffer!")
+                        .buffered_changes
+                        .remove(&state);
+
+                    changes.map(|mut op_vec|
+                        for op in op_vec.drain(..){
+                            (op)(world, resources);
+                        }
+                    );
+
                     // Run schedule for state_n
                     self.run_once(world, resources);
             
@@ -146,10 +165,19 @@ enum RollbackState{
     Rolledback(usize),
 }
 
+#[derive(Debug)]
+enum RollbackError{
+    FrameTimeout,
+    ResourceNotFound,
+}
+
+trait BufferedChange = FnOnce(&mut World, &mut Resources) -> () + Sync + Send + 'static;
+
 struct RollbackBuffer{
     newest_frame: usize,
     rollback_state: RollbackState,
 
+    buffered_changes: HashMap<usize, Vec<Box<dyn BufferedChange>>>,
     scenes: Vec<Scene>,
     resources: Vec<Resources>,   
 }
@@ -160,8 +188,20 @@ impl RollbackBuffer{
             newest_frame: 0,
             rollback_state: RollbackState::Rolledback(0),
 
+            buffered_changes: HashMap::new(),
             scenes: Vec::with_capacity(buffer_size),
             resources: Vec::with_capacity(buffer_size),
         }
+    }
+
+    pub fn past_frame_change<O: BufferedChange>(&mut self, op: O, frame: usize) -> Result<(), RollbackError>{
+        if self.newest_frame - frame >= self.scenes.len(){
+            return Err(RollbackError::FrameTimeout);
+        }
+        match self.buffered_changes.entry(frame){
+            Entry::Occupied(mut o) => o.get_mut().push(Box::new(op)),
+            Entry::Vacant(v) => {v.insert(vec![Box::new(op)]);},
+        };
+        Ok(())
     }
 }
