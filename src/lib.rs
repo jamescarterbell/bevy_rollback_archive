@@ -7,6 +7,7 @@ use bevy::{
         stage::UPDATE,
     },
     reflect::TypeRegistryArc,
+    scene::serde::SceneSerializer,
 };
 use std::sync::Mutex;
 use std::ops::DerefMut;
@@ -152,15 +153,29 @@ impl RollbackStage{
                     // Run schedule for state_n
                     self.run_once(world, resources);
             
-                    // Store state_n+1
-            
                     // Increment counters
                     let mut rollback_buffer = resources
                         .get_mut::<RollbackBuffer>()
                         .expect("Couldn't find RollbackBuffer!");
                     let new_state = state + 1;
                     rollback_buffer.rollback_state = RollbackState::Rolledback(new_state);
+                    
+                    let type_registry = resources
+                        .get::<TypeRegistryArc>()
+                        .expect("Couldn't find TypeRegistryArc!");
+
+                    let assets = resources
+                        .get::<Assets<DynamicScene>>()
+                        .expect("Couldn't find DynamicScene Assets");
                 
+                    // Store state_n+1
+                    let scene_serializer = SceneSerializer::new(
+                        assets
+                            .get(rollback_buffer.tracked_entities.clone())
+                            .unwrap(),
+                        &type_registry
+                    );
+
                     if new_state == rollback_buffer.newest_frame{
                         // We're all caugt up!
                         break;
