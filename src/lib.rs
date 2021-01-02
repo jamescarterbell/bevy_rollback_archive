@@ -6,6 +6,7 @@ use bevy::{
         *,
         stage::UPDATE,
     },
+    reflect::TypeRegistryArc,
 };
 use std::sync::Mutex;
 use std::ops::DerefMut;
@@ -75,12 +76,64 @@ impl RollbackStage{
                     // Perform initial rollback
                     // Despawn current rollback scene
                     // Spawn new rollback scene
-                    
-                    // Setup for catchup
-                    resources
+                    let mut scene_spawner = resources
+                        .get_mut::<SceneSpawner>()
+                        .expect("Couldn't find SceneSpawner!");
+
+                    let mut rollback_buffer = resources
                         .get_mut::<RollbackBuffer>()
-                        .expect("Couldn't find RollbackBuffer!")
+                        .expect("Couldn't find RollbackBuffer!");
+
+                    let type_registry = resources
+                        .get::<TypeRegistryArc>()
+                        .expect("Couldn't find TypeRegistryArc");
+
+                    let mut assets = resources
+                        .get_mut::<Assets<DynamicScene>>()
+                        .expect("Couldn't find DynamicScenes");
+
+                    let old_scene = rollback_buffer
+                        .tracked_entities
+                        .clone();
+
+                    scene_spawner.despawn(old_scene);
+
+                    let len = rollback_buffer.scenes.len();
+
+                    let new_scene = DynamicScene::from_scene(rollback_buffer
+                        .scenes
+                        .get(state % len)
+                        .expect("Couldn't find scene in buffer!"),
+                        &type_registry);
+
+                    let new_scene = assets.add(new_scene);
+
+                    scene_spawner.spawn_dynamic(new_scene.clone());
+                    rollback_buffer.tracked_entities = new_scene;
+
+                    scene_spawner.despawn_queued_scenes(world);
+                    scene_spawner.spawn_queued_scenes(world, resources);
+
+                    // Setup for catchup
+                    rollback_buffer
                         .rollback_state = RollbackState::Rolledback(state);
+
+                    // Perform resource changes last since we'll have to drop everything we were using
+                    let resource_rollback = rollback_buffer.resource_rollback_fn.take().unwrap_or(Vec::new());
+                    let past_resources = rollback_buffer
+                        .resources.get_mut(state % len)
+                        .expect("Couldn't find resources in buffer!")
+                        .take()
+                        .unwrap_or(Resources::default());
+
+                    drop(scene_spawner);
+                    drop(rollback_buffer);
+                    drop(type_registry);
+                    drop(assets);
+
+                    for resource_rollback_fn in resource_rollback.iter(){
+                        (resource_rollback_fn)(resources, &past_resources);
+                    }
                 },
                 RollbackState::Rolledback(state) => {
                     // Apply buffered changes for state
@@ -172,25 +225,36 @@ enum RollbackError{
 }
 
 trait BufferedChange = FnOnce(&mut World, &mut Resources) -> () + Sync + Send + 'static;
+trait ResourceRollbackFn = Fn(&mut Resources, &Resources) -> () + Sync + Send + 'static;
 
 struct RollbackBuffer{
     newest_frame: usize,
     rollback_state: RollbackState,
+    tracked_entities: Handle<DynamicScene>,
 
     buffered_changes: HashMap<usize, Vec<Box<dyn BufferedChange>>>,
     scenes: Vec<Scene>,
-    resources: Vec<Resources>,   
+    resources: Vec<Option<Resources>>,   
+
+    resource_rollback_fn: Option<Vec<Box<dyn ResourceRollbackFn>>>,
 }
 
 impl RollbackBuffer{
-    pub fn new(buffer_size: usize) -> Self{
+    pub fn new(buffer_size: usize, assets: &mut Assets<DynamicScene>, type_registry: &TypeRegistryArc) -> Self{
         RollbackBuffer{
             newest_frame: 0,
             rollback_state: RollbackState::Rolledback(0),
+            tracked_entities: assets
+                .add(DynamicScene::from_world(
+                    &World::new(),
+                    type_registry
+            )),
 
             buffered_changes: HashMap::new(),
             scenes: Vec::with_capacity(buffer_size),
             resources: Vec::with_capacity(buffer_size),
+
+            resource_rollback_fn: None,
         }
     }
 
