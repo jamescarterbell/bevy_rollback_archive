@@ -135,9 +135,16 @@ impl RollbackStage{
                     for resource_rollback_fn in resource_rollback.iter(){
                         (resource_rollback_fn)(resources, &past_resources);
                     }
+
+                    resources
+                        .get_mut::<RollbackBuffer>()
+                        .expect("Couldn't find RollbackBuffer!")
+                        .resource_rollback_fn = Some(resource_rollback);
                 },
                 RollbackState::Rolledback(state) => {
+                    // Apply overrides to state from stored state (for inputs for instance)
                     // Apply buffered changes for state
+
                     let changes = resources
                         .get_mut::<RollbackBuffer>()
                         .expect("Couldn't find RollbackBuffer!")
@@ -169,12 +176,30 @@ impl RollbackStage{
                         .expect("Couldn't find DynamicScene Assets");
                 
                     // Store state_n+1
-                    let scene_serializer = SceneSerializer::new(
-                        assets
-                            .get(rollback_buffer.tracked_entities.clone())
-                            .unwrap(),
-                        &type_registry
-                    );
+                    let stored_scene = assets
+                        .get(rollback_buffer.tracked_entities.clone())
+                        .expect("Couldn't find rollback scene!")
+                        .get_scene(resources)
+                        .expect("Couldn't get Scene from DynamicScene!");
+
+                    let len = rollback_buffer.scenes.len();
+
+                    *rollback_buffer
+                        .scenes
+                        .get_mut(state % len)
+                        .expect("Index error in scene buffer!") = stored_scene;
+
+                    let mut stored_resources = Resources::default();
+
+                    let resource_rollback = rollback_buffer.resource_rollback_fn.take().unwrap_or(Vec::new());
+                    for resource_rollback_fn in resource_rollback.iter(){
+                        (resource_rollback_fn)(&mut stored_resources, &resources);
+                    }
+
+                    resources
+                        .get_mut::<RollbackBuffer>()
+                        .expect("Couldn't find RollbackBuffer!")
+                        .resource_rollback_fn = Some(resource_rollback);
 
                     if new_state == rollback_buffer.newest_frame{
                         // We're all caugt up!
