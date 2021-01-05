@@ -44,7 +44,7 @@ struct RollbackStage{
 }
 
 impl RollbackStage{
-    fn with_schedule(schedule: Schedule) -> Self{
+    pub fn with_schedule(schedule: Schedule) -> Self{
         Self{
             schedule,
             run_criteria: None,
@@ -52,7 +52,7 @@ impl RollbackStage{
         }
     }
 
-    fn new() -> Self{
+    pub fn new() -> Self{
         Self{
             schedule: Schedule::default(),
             run_criteria: None,
@@ -237,6 +237,20 @@ impl RollbackStage{
                 }
             };
         };
+    }
+
+    pub fn with_run_criteria<S: System<In = (), Out = ShouldRun>>(mut self, system: S) -> Self {
+        self.set_run_criteria(system);
+        self
+    }
+
+    pub fn set_run_criteria<S: System<In = (), Out = ShouldRun>>(
+        &mut self,
+        system: S,
+    ) -> &mut Self {
+        self.run_criteria = Some(Box::new(system.system()));
+        self.run_criteria_initialized = false;
+        self
     }
 }
 
