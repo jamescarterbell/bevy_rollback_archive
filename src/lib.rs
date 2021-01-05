@@ -23,11 +23,41 @@ pub mod logic_stage{
 
 struct RollbackPlugin{
     schedule: Mutex<Option<Schedule>>,
+    buffer_size: usize,
+}
+
+impl RollbackPlugin{
+    pub fn new(buffer_size: usize, schedule: Schedule) -> Self{
+        Self{
+            schedule: Mutex::new(Some(schedule)),
+            buffer_size
+        }
+    }
+
+    pub fn with_buffer_size(buffer_size: usize) -> Self{
+        Self{
+            schedule: Mutex::new(None),
+            buffer_size
+        }
+    }
 }
 
 impl Plugin for RollbackPlugin{
     fn build(&self, app: &mut AppBuilder){
+        let mut resources = app.resources_mut();
+
+        let rollback_buffer = RollbackBuffer::new(
+            self.buffer_size,
+            &mut resources.get_mut::<Assets<DynamicScene>>().expect("Couldn't find DynamicScene!"),
+            &resources.get::<TypeRegistryArc>().expect("Couldn't find TypeRegistryArc"),
+        );
+
+        drop(resources);
+
         app
+            .add_resource(
+                rollback_buffer
+            )
             .add_stage_before(
                 UPDATE,
                 stage::ROLLBACK_UPDATE,
