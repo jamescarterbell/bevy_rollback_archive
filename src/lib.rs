@@ -143,8 +143,36 @@ impl RollbackStage{
                 },
                 RollbackState::Rolledback(state) => {
                     // Apply overrides to state from stored state (for inputs for instance)
+                    let mut rollback_buffer = resources
+                        .get_mut::<RollbackBuffer>()
+                        .expect("Couldn't find RollbackBuffer!");
+
+                    let len = rollback_buffer.scenes.len();
+                    let resource_overrides = rollback_buffer.resource_rollback_fn.take().unwrap_or(Vec::new());
+
+                    let past_resources = rollback_buffer
+                        .resources.get_mut(state % len)
+                        .expect("Couldn't find resources in buffer!")
+                        .take()
+                        .unwrap_or(Resources::default());
+
+                    drop(rollback_buffer);
+
+                    for resource_overrides_fn in resource_overrides.iter(){
+                        (resource_overrides_fn)(resources, &past_resources);
+                    }
+                    
+                    let mut rollback_buffer = resources
+                        .get_mut::<RollbackBuffer>()
+                        .expect("Couldn't find RollbackBuffer!");
+
+                    rollback_buffer
+                        .resource_rollback_fn = Some(resource_overrides);
+
                     // Apply buffered changes for state
 
+                    drop(rollback_buffer);
+                    
                     let changes = resources
                         .get_mut::<RollbackBuffer>()
                         .expect("Couldn't find RollbackBuffer!")
@@ -157,13 +185,15 @@ impl RollbackStage{
                         }
                     );
 
+
                     // Run schedule for state_n
                     self.run_once(world, resources);
-            
-                    // Increment counters
+                    
                     let mut rollback_buffer = resources
                         .get_mut::<RollbackBuffer>()
                         .expect("Couldn't find RollbackBuffer!");
+            
+                    // Increment counters
                     let new_state = state + 1;
                     rollback_buffer.rollback_state = RollbackState::Rolledback(new_state);
                     
@@ -182,7 +212,6 @@ impl RollbackStage{
                         .get_scene(resources)
                         .expect("Couldn't get Scene from DynamicScene!");
 
-                    let len = rollback_buffer.scenes.len();
 
                     *rollback_buffer
                         .scenes
@@ -277,6 +306,7 @@ struct RollbackBuffer{
     resources: Vec<Option<Resources>>,   
 
     resource_rollback_fn: Option<Vec<Box<dyn ResourceRollbackFn>>>,
+    resource_overrides: Option<Vec<Box<dyn ResourceRollbackFn>>>
 }
 
 impl RollbackBuffer{
@@ -295,6 +325,7 @@ impl RollbackBuffer{
             resources: Vec::with_capacity(buffer_size),
 
             resource_rollback_fn: None,
+            resource_overrides: None
         }
     }
 
