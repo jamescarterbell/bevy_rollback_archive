@@ -70,7 +70,6 @@ struct RollbackStage{
     schedule: Schedule,
     run_criteria: Option<Box<dyn System<In = (), Out = ShouldRun>>>,
     run_criteria_initialized: bool,
-    
 }
 
 impl RollbackStage{
@@ -91,6 +90,9 @@ impl RollbackStage{
     }
 
     fn run_once(&mut self, world: &mut World, resources: &mut Resources){
+        // Update tracked entities
+        update_tracked_entities(world, resources);
+        // Update tracked resources
         self.schedule.run_once(world, resources);
     }
 
@@ -383,4 +385,44 @@ impl RollbackBuffer{
         };
         Ok(())
     }
+}
+
+struct RollbackTracked;
+
+fn update_tracked_entities(world: &mut World, resources: &mut Resources){
+    let mut scene = DynamicScene::default();
+    let type_registry_arc = resources.get::<TypeRegistryArc>().expect("Couldn't find TypeRegistryArc");
+    let type_registry = type_registry_arc.read();
+
+    for archetype in world.archetypes().filter(|at| at.has::<RollbackTracked>()){
+        let mut entities = Vec::new();
+        for (index, entity) in archetype.iter_entities().enumerate() {
+            if index == entities.len() {
+                entities.push(bevy::scene::Entity {
+                    entity: entity.id(),
+                    components: Vec::new(),
+                })
+            }
+            for type_info in archetype.types() {
+                if let Some(registration) = type_registry.get(type_info.id()) {
+                    if let Some(reflect_component) = registration.data::<ReflectComponent>() {
+                        // SAFE: the index comes directly from a currently live component
+                        unsafe {
+                            let component =
+                                reflect_component.reflect_component(&archetype, index);
+                            entities[index].components.push(component.clone_value());
+                        }
+                    }
+                }
+            }
+        }
+
+        scene.entities.extend(entities.drain(..));
+    }
+
+    let mut rollback_buffer = resources.get_mut::<RollbackBuffer>().expect("Couldn't find RollbackBuffer!");
+    let mut scenes = resources.get_mut::<Assets<DynamicScene>>().expect("Couldn't find Dynamic Scene Assets!");
+
+    scenes.remove(rollback_buffer.tracked_entities.clone());
+    rollback_buffer.tracked_entities = scenes.add(scene);
 }
