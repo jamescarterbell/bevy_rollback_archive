@@ -211,12 +211,9 @@ impl RollbackStage{
                         .buffered_changes
                         .remove(&state);
 
-                    changes.map(|mut op_vec|
-                        for op in op_vec.drain(..){
-                            (op)(world, resources);
-                        }
-                    );
-
+                    if let Some(mut changes) = changes{
+                        changes.run_once(world, resources);
+                    }
 
                     // Run schedule for state_n
                     self.run_once(world, resources);
@@ -339,15 +336,14 @@ enum RollbackError{
     ResourceNotFound,
 }
 
-trait BufferedChange = FnOnce(&mut World, &mut Resources) -> () + Sync + Send + 'static;
-trait ResourceRollbackFn = Fn(&mut Resources, &Resources) -> () + Sync + Send + 'static;
+trait ResourceRollbackFn = Fn(&mut Resources, &Resources) -> () + Sync + Send;
 
 struct RollbackBuffer{
     newest_frame: usize,
     rollback_state: RollbackState,
     tracked_entities: Handle<DynamicScene>,
 
-    buffered_changes: HashMap<usize, Vec<Box<dyn BufferedChange>>>,
+    buffered_changes: HashMap<usize, SystemStage>,
     scenes: Vec<Scene>,
     resources: Vec<Option<Resources>>,   
 
@@ -375,13 +371,17 @@ impl RollbackBuffer{
         }
     }
 
-    pub fn past_frame_change<O: BufferedChange>(&mut self, op: O, frame: usize) -> Result<(), RollbackError>{
+    pub fn past_frame_change<S: System<In = (), Out = ()>>(&mut self, op: S, frame: usize) -> Result<(), RollbackError>{
         if self.newest_frame - frame >= self.scenes.len(){
             return Err(RollbackError::FrameTimeout);
         }
         match self.buffered_changes.entry(frame){
-            Entry::Occupied(mut o) => o.get_mut().push(Box::new(op)),
-            Entry::Vacant(v) => {v.insert(vec![Box::new(op)]);},
+            Entry::Occupied(mut o) => o.get_mut().add_system(op),
+            Entry::Vacant(v) => v.insert({
+                let mut stage = SystemStage::parallel();
+                stage.add_system(op);
+                stage
+            }),
         };
         Ok(())
     }
@@ -425,4 +425,43 @@ fn update_tracked_entities(world: &mut World, resources: &mut Resources){
 
     scenes.remove(rollback_buffer.tracked_entities.clone());
     rollback_buffer.tracked_entities = scenes.add(scene);
+}
+
+pub trait ResourceTracker{
+    fn track_resource<R: Resource + Clone +>(&mut self) -> &mut Self;
+    fn override_resouce<R: Resource + Clone>(&mut self) -> &mut Self;
+}
+
+impl ResourceTracker for AppBuilder{
+    fn track_resource<R: Resource + Clone>(&mut self) -> &mut Self{
+        {
+            let mut rollback_buffer = self.resources().get_mut::<RollbackBuffer>().expect("Couldn't find RollbackBuffer!");
+
+            rollback_buffer
+                .resource_rollback_fn
+                .get_or_insert(Vec::new())
+                .push(
+                    Box::new(|dest_res: &mut Resources, res: &Resources|{
+                        dest_res.insert(res.get_cloned::<R>().unwrap());
+                    })
+            );
+        }
+        self
+    }
+
+    fn  override_resouce<R: Resource + Clone>(&mut self) -> &mut Self{
+        {
+            let mut rollback_buffer = self.resources().get_mut::<RollbackBuffer>().expect("Couldn't find RollbackBuffer!");
+
+            rollback_buffer
+                .resource_overrides
+                .get_or_insert(Vec::new())
+                .push(
+                Box::new(|dest_res: &mut Resources, res: &Resources|{
+                    dest_res.insert(res.get_cloned::<R>().unwrap());
+                })
+            );
+        }
+        self
+    }
 }
