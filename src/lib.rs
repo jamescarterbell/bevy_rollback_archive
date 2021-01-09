@@ -464,7 +464,7 @@ impl ResourceTracker for AppBuilder{
         self
     }
 
-    fn  override_resouce<R: Resource + Clone>(&mut self) -> &mut Self{
+    fn  override_resource<R: Resource + Clone>(&mut self) -> &mut Self{
         {
             let mut rollback_buffer = self.resources().get_mut::<RollbackBuffer>().expect("Couldn't find RollbackBuffer!");
 
