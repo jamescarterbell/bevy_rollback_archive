@@ -469,6 +469,15 @@ impl ResourceTracker for AppBuilder{
             let mut rollback_buffer = self.resources().get_mut::<RollbackBuffer>().expect("Couldn't find RollbackBuffer!");
 
             rollback_buffer
+                .resource_rollback_fn
+                .get_or_insert(Vec::new())
+                .push(
+                Box::new(|dest_res: &mut Resources, res: &Resources|{
+                    dest_res.insert(res.get_cloned::<R>().unwrap());
+                })
+            );
+
+            rollback_buffer
                 .resource_overrides
                 .get_or_insert(Vec::new())
                 .push(
