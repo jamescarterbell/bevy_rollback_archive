@@ -444,7 +444,7 @@ fn update_tracked_entities(world: &mut World, resources: &mut Resources){
 
 pub trait ResourceTracker{
     fn track_resource<R: Resource + Clone +>(&mut self) -> &mut Self;
-    fn override_resouce<R: Resource + Clone>(&mut self) -> &mut Self;
+    fn override_resource<R: Resource + Clone>(&mut self) -> &mut Self;
 }
 
 impl ResourceTracker for AppBuilder{
