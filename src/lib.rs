@@ -24,21 +24,29 @@ pub mod logic_stage{
 pub struct RollbackPlugin{
     schedule: Mutex<Option<Schedule>>,
     buffer_size: usize,
+    run_criteria: Mutex<Option<Box<dyn System<In = (), Out = ShouldRun>>>>,
 }
 
 impl RollbackPlugin{
     pub fn new(buffer_size: usize, schedule: Schedule) -> Self{
         Self{
             schedule: Mutex::new(Some(schedule)),
-            buffer_size
+            buffer_size,
+            run_criteria: Mutex::new(None),
         }
     }
 
     pub fn with_buffer_size(buffer_size: usize) -> Self{
         Self{
             schedule: Mutex::new(None),
-            buffer_size
+            buffer_size,
+            run_criteria: Mutex::new(None),
         }
+    }
+
+    pub fn with_run_criteria<S: System<In = (), Out = ShouldRun>>(mut self, system: S) -> Self {
+        self.run_criteria = Mutex::new(Some(Box::new(system)));
+        self
     }
 }
 
@@ -54,6 +62,13 @@ impl Plugin for RollbackPlugin{
 
         drop(resources);
 
+        let run_criteria = self.run_criteria.lock().unwrap().take();
+
+        let mut stage = RollbackStage::with_schedule(self.schedule.lock().unwrap().take().unwrap());
+        
+        stage.run_criteria = run_criteria;
+        stage.run_criteria_initialized = false;
+
         app
             .add_resource(
                 rollback_buffer
@@ -61,7 +76,7 @@ impl Plugin for RollbackPlugin{
             .add_stage_before(
                 UPDATE,
                 stage::ROLLBACK_UPDATE,
-                RollbackStage::with_schedule(self.schedule.lock().unwrap().take().unwrap())
+                stage
             );
     }
 }
