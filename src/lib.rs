@@ -21,7 +21,7 @@ pub mod logic_stage{
     pub const SAVE_STATE: &str = "save_state";
 }
 
-struct RollbackPlugin{
+pub struct RollbackPlugin{
     schedule: Mutex<Option<Schedule>>,
     buffer_size: usize,
 }
@@ -66,7 +66,7 @@ impl Plugin for RollbackPlugin{
     }
 }
 
-struct RollbackStage{
+pub struct RollbackStage{
     schedule: Schedule,
     run_criteria: Option<Box<dyn System<In = (), Out = ShouldRun>>>,
     run_criteria_initialized: bool,
@@ -89,14 +89,14 @@ impl RollbackStage{
         }
     }
 
-    fn run_once(&mut self, world: &mut World, resources: &mut Resources){
+    pub fn run_once(&mut self, world: &mut World, resources: &mut Resources){
         // Update tracked entities
         update_tracked_entities(world, resources);
         // Update tracked resources
         self.schedule.run_once(world, resources);
     }
 
-    fn run_rollback(&mut self, world: &mut World, resources: &mut Resources){
+    pub fn run_rollback(&mut self, world: &mut World, resources: &mut Resources){
         loop{
             
             let current_state = resources
@@ -331,14 +331,14 @@ enum RollbackState{
 }
 
 #[derive(Debug)]
-enum RollbackError{
+pub enum RollbackError{
     FrameTimeout,
     ResourceNotFound,
 }
 
-trait ResourceRollbackFn = Fn(&mut Resources, &Resources) -> () + Sync + Send;
+pub trait ResourceRollbackFn = Fn(&mut Resources, &Resources) -> () + Sync + Send;
 
-struct RollbackBuffer{
+pub struct RollbackBuffer{
     newest_frame: usize,
     rollback_state: RollbackState,
     tracked_entities: Handle<DynamicScene>,
