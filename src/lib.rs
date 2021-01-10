@@ -31,7 +31,7 @@ pub struct RollbackPlugin{
 }
 
 impl RollbackPlugin{
-    pub fn new(buffer_size: usize, schedule: Schedule) -> Self{
+    pub fn with_schedule(buffer_size: usize, schedule: Schedule) -> Self{
         Self{
             schedule: Mutex::new(Some(schedule)),
             buffer_size,
