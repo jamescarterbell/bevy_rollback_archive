@@ -67,7 +67,15 @@ impl Plugin for RollbackPlugin{
 
         let run_criteria = self.run_criteria.lock().unwrap().take();
 
-        let mut stage = RollbackStage::with_schedule(self.schedule.lock().unwrap().take().unwrap());
+        
+        let mut stage = {
+            if let Some(schedule) = self.schedule.lock().unwrap().take(){
+                RollbackStage::with_schedule(schedule)
+            }
+            else{
+                RollbackStage::new()
+            }
+        };
         
         stage.run_criteria = run_criteria;
         stage.run_criteria_initialized = false;
