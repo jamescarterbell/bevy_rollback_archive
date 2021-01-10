@@ -17,8 +17,11 @@ pub mod stage{
     pub const ROLLBACK_UPDATE: &str = "rollback_update";
 }
 
-pub mod logic_stage{
+pub mod logic_stages{
     pub const SAVE_STATE: &str = "save_state";
+    pub const LOGIC_UPDATE: &str = "logic_update";
+    pub const LOGIC_PREUPDATE: &str = "logic_preupdate";
+    pub const LOGIC_POSTUPDATE: &str = "logic_postupdate";
 }
 
 pub struct RollbackPlugin{
@@ -83,6 +86,7 @@ impl Plugin for RollbackPlugin{
 
 pub struct RollbackStage{
     schedule: Schedule,
+    initialized: bool,
     run_criteria: Option<Box<dyn System<In = (), Out = ShouldRun>>>,
     run_criteria_initialized: bool,
 }
@@ -91,6 +95,7 @@ impl RollbackStage{
     pub fn with_schedule(schedule: Schedule) -> Self{
         Self{
             schedule,
+            initialized: false,
             run_criteria: None,
             run_criteria_initialized: false,
         }
@@ -98,7 +103,11 @@ impl RollbackStage{
 
     pub fn new() -> Self{
         Self{
-            schedule: Schedule::default(),
+            schedule: Schedule::default()
+                .with_stage(logic_stages::LOGIC_UPDATE, SystemStage::parallel())
+                .with_stage_before(logic_stages::LOGIC_UPDATE, logic_stages::LOGIC_PREUPDATE, SystemStage::parallel())
+                .with_stage_after(logic_stages::LOGIC_UPDATE, logic_stages::LOGIC_POSTUPDATE, SystemStage::parallel()),
+            initialized: false,
             run_criteria: None,
             run_criteria_initialized: false,
         }
@@ -117,7 +126,8 @@ impl RollbackStage{
             let current_state = resources
                 .get::<RollbackBuffer>()
                 .expect("Couldn't find RollbackBuffer!")
-                .rollback_state;
+                .rollback_state
+                .clone();
 
             match current_state{
                 RollbackState::Rollback(state) => {
@@ -151,7 +161,9 @@ impl RollbackStage{
                     let new_scene = DynamicScene::from_scene(rollback_buffer
                         .scenes
                         .get(state % len)
-                        .expect("Couldn't find scene in buffer!"),
+                        .expect("Couldn't find scene in buffer!")
+                        .as_ref()
+                        .expect("Scene is empty!"),
                         &type_registry);
 
                     let new_scene = assets.add(new_scene);
@@ -195,10 +207,11 @@ impl RollbackStage{
                         .expect("Couldn't find RollbackBuffer!");
 
                     let len = rollback_buffer.scenes.len();
-                    let resource_overrides = rollback_buffer.resource_rollback_fn.take().unwrap_or(Vec::new());
+                    let resource_overrides = rollback_buffer.resource_overrides.take().unwrap_or(Vec::new());
 
                     let past_resources = rollback_buffer
-                        .resources.get_mut(state % len)
+                        .resources
+                        .get_mut(state % len)
                         .expect("Couldn't find resources in buffer!")
                         .take()
                         .unwrap_or(Resources::default());
@@ -218,13 +231,12 @@ impl RollbackStage{
 
                     // Apply buffered changes for state
 
-                    drop(rollback_buffer);
                     
-                    let changes = resources
-                        .get_mut::<RollbackBuffer>()
-                        .expect("Couldn't find RollbackBuffer!")
+                    let changes = rollback_buffer
                         .buffered_changes
                         .remove(&state);
+
+                    drop(rollback_buffer);
 
                     if let Some(mut changes) = changes{
                         changes.run_once(world, resources);
@@ -240,10 +252,6 @@ impl RollbackStage{
                     // Increment counters
                     let new_state = state + 1;
                     rollback_buffer.rollback_state = RollbackState::Rolledback(new_state);
-                    
-                    let type_registry = resources
-                        .get::<TypeRegistryArc>()
-                        .expect("Couldn't find TypeRegistryArc!");
 
                     let assets = resources
                         .get::<Assets<DynamicScene>>()
@@ -260,18 +268,23 @@ impl RollbackStage{
                     *rollback_buffer
                         .scenes
                         .get_mut(state % len)
-                        .expect("Index error in scene buffer!") = stored_scene;
+                        .expect("Index error in scene buffer!") = Some(stored_scene);
 
                     let mut stored_resources = Resources::default();
 
                     let resource_rollback = rollback_buffer.resource_rollback_fn.take().unwrap_or(Vec::new());
+                    
+                    drop(rollback_buffer);
+
                     for resource_rollback_fn in resource_rollback.iter(){
                         (resource_rollback_fn)(&mut stored_resources, &resources);
                     }
 
-                    resources
+                    let mut rollback_buffer = resources
                         .get_mut::<RollbackBuffer>()
-                        .expect("Couldn't find RollbackBuffer!")
+                        .expect("Couldn't find RollbackBuffer!");
+
+                    rollback_buffer
                         .resource_rollback_fn = Some(resource_rollback);
 
                     if new_state == rollback_buffer.newest_frame{
@@ -306,6 +319,33 @@ impl Stage for RollbackStage{
                 self.run_criteria_initialized = true;
             }
         }
+
+        if !self.initialized{
+            self.initialized = true;
+
+            let mut rollback_buffer = resources
+                .get_mut::<RollbackBuffer>()
+                .expect("Couldn't find RollbackBuffer!");
+
+            let resource_overrides = rollback_buffer.resource_overrides.take().unwrap_or(Vec::new());
+
+            let mut past_resources = Resources::default();
+
+            drop(rollback_buffer);
+
+            for resource_overrides_fn in resource_overrides.iter(){
+                (resource_overrides_fn)(&mut past_resources, resources);
+            }
+            
+            let mut rollback_buffer = resources
+                .get_mut::<RollbackBuffer>()
+                .expect("Couldn't find RollbackBuffer!");
+
+            rollback_buffer
+                .resource_rollback_fn = Some(resource_overrides);
+
+        }
+
         self.schedule.initialize(world, resources);
     }
 
@@ -359,7 +399,7 @@ pub struct RollbackBuffer{
     tracked_entities: Handle<DynamicScene>,
 
     buffered_changes: HashMap<usize, SystemStage>,
-    scenes: Vec<Scene>,
+    scenes: Vec<Option<Scene>>,
     resources: Vec<Option<Resources>>,   
 
     resource_rollback_fn: Option<Vec<Box<dyn ResourceRollbackFn>>>,
@@ -378,8 +418,8 @@ impl RollbackBuffer{
             )),
 
             buffered_changes: HashMap::new(),
-            scenes: Vec::with_capacity(buffer_size),
-            resources: Vec::with_capacity(buffer_size),
+            scenes: (0..buffer_size).map(|_| None).collect(),
+            resources: (0..buffer_size).map(|_| None).collect(),
 
             resource_rollback_fn: None,
             resource_overrides: None
@@ -464,7 +504,7 @@ impl ResourceTracker for AppBuilder{
         self
     }
 
-    fn  override_resource<R: Resource + Clone>(&mut self) -> &mut Self{
+    fn override_resource<R: Resource + Clone>(&mut self) -> &mut Self{
         {
             let mut rollback_buffer = self.resources().get_mut::<RollbackBuffer>().expect("Couldn't find RollbackBuffer!");
 
@@ -486,6 +526,90 @@ impl ResourceTracker for AppBuilder{
                 })
             );
         }
+        self
+    }
+}
+
+pub trait RollbackStageUtil{
+    fn add_logic_system<S: System<In = (), Out = ()>>(&mut self, system: S) -> &mut AppBuilder;
+    fn add_logic_system_to_stage<S: System<In = (), Out = ()>>(&mut self, stage_name: &'static str, system: S) -> &mut AppBuilder;
+    fn add_logic_stage<S: Stage>(&mut self, name: &str, stage: S) -> &mut AppBuilder;
+    fn add_logic_stage_after<S: Stage>(&mut self, target: &str, name: &str, stage: S) -> &mut AppBuilder;
+    fn add_logic_stage_before<S: Stage>(&mut self, target: &str, name: &str, stage: S) -> &mut AppBuilder;
+}
+
+impl RollbackStageUtil for AppBuilder{
+
+
+    fn add_logic_system<S: System<In = (), Out = ()>>(&mut self, system: S) -> &mut AppBuilder{
+        self
+            .app
+            .schedule
+            .get_stage_mut::<RollbackStage>(stage::ROLLBACK_UPDATE)
+            .expect("Add RollbackStage to app!")
+            .schedule
+            .add_system_to_stage(
+                logic_stages::LOGIC_UPDATE,
+                system
+            );
+        self
+    }
+
+    fn add_logic_system_to_stage<S: System<In = (), Out = ()>>(&mut self, stage_name: &'static str, system: S) -> &mut AppBuilder{
+        self
+            .app
+            .schedule
+            .get_stage_mut::<RollbackStage>(stage::ROLLBACK_UPDATE)
+            .expect("Add RollbackStage to app!")
+            .schedule
+            .add_system_to_stage(
+                stage_name,
+                system
+            );
+        self
+    }
+
+    fn add_logic_stage<S: Stage>(&mut self, name: &str, stage: S) -> &mut AppBuilder{
+        self
+            .app
+            .schedule
+            .get_stage_mut::<RollbackStage>(stage::ROLLBACK_UPDATE)
+            .expect("Add RollbackStage to app!")
+            .schedule
+            .add_stage(
+                name,
+                stage
+            );
+        self
+    }
+
+    fn add_logic_stage_after<S: Stage>(&mut self, target: &str, name: &str, stage: S) -> &mut AppBuilder{
+        self
+            .app
+            .schedule
+            .get_stage_mut::<RollbackStage>(stage::ROLLBACK_UPDATE)
+            .expect("Add RollbackStage to app!")
+            .schedule
+            .add_stage_after(
+                target,
+                name,
+                stage
+            );
+        self
+    }
+
+    fn add_logic_stage_before<S: Stage>(&mut self, target: &str, name: &str, stage: S) -> &mut AppBuilder{
+        self
+            .app
+            .schedule
+            .get_stage_mut::<RollbackStage>(stage::ROLLBACK_UPDATE)
+            .expect("Add RollbackStage to app!")
+            .schedule
+            .add_stage_before(
+                target,
+                name,
+                stage
+            );
         self
     }
 }
