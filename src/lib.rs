@@ -450,7 +450,7 @@ impl RollbackBuffer{
     }
 }
 
-struct RollbackTracked;
+pub struct RollbackTracked;
 
 fn update_tracked_entities(world: &mut World, resources: &mut Resources){
     let mut scene = DynamicScene::default();
