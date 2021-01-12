@@ -1,7 +1,7 @@
 #![feature(trait_alias)]
 
 use bevy::{
-    ecs::{Schedule, Stage, ShouldRun},
+    ecs::{Schedule, Stage, ShouldRun, Archetype},
     prelude::{
         *,
         stage::UPDATE,
@@ -122,10 +122,30 @@ impl RollbackStage{
     }
 
     pub fn run_once(&mut self, world: &mut World, resources: &mut Resources){
-        // Update tracked resources
-        self.schedule.run_once(world, resources);
-        // Update tracked entities
-        update_tracked_entities(world, resources);
+        let mut rollback_buffer = resources
+                .get_mut::<RollbackBuffer>()
+                .expect("Couldn't find RollbackBuffer!");
+
+        let state = rollback_buffer.newest_frame;
+        let target = state % rollback_buffer.past_resources.len();
+        // Apply changes
+        if let Some(changes) = rollback_buffer.buffered_changes.remove(&state){
+            changes.run_once(
+                &mut rollback_buffer.current_world,
+                &mut rollback_buffer.current_resources,
+            );
+        }
+
+        // Apply overrides
+        for override_fn in rollback_buffer.resource_override.iter(){
+            (override_fn)(&mut rollback_buffer.current_resources, rollback_buffer.past_resources.get(target).unwrap().as_ref().unwrap());
+        }
+        
+        // Run the schedule
+        self.schedule.run_once(&mut rollback_buffer.current_world, &mut rollback_buffer.current_resources);
+        // Store the new stuff
+        store_new_resources(resources);
+        store_new_world(resources);
     }
 
     pub fn run_rollback(&mut self, world: &mut World, resources: &mut Resources){
@@ -139,119 +159,37 @@ impl RollbackStage{
 
             match current_state{
                 RollbackState::Rollback(state) => {
-                    // Perform initial rollback
-                    // Despawn current rollback scene
-                    // Spawn new rollback scene
-                    let mut scene_spawner = resources
-                        .get_mut::<SceneSpawner>()
-                        .expect("Couldn't find SceneSpawner!");
-
+                    // Literally just swap the worlds
                     let mut rollback_buffer = resources
                         .get_mut::<RollbackBuffer>()
                         .expect("Couldn't find RollbackBuffer!");
 
-                    let type_registry = resources
-                        .get::<TypeRegistryArc>()
-                        .expect("Couldn't find TypeRegistryArc");
+                    let target = rollback_buffer.newest_frame % 
+                        rollback_buffer
+                            .past_worlds
+                            .len();
 
-                    let mut dy_assets = resources
-                        .get_mut::<Assets<DynamicScene>>()
-                        .expect("Couldn't find DynamicScenes");
+                    rollback_buffer
+                        .current_world = rollback_buffer
+                            .past_worlds
+                            .get_mut(target)
+                            .unwrap()
+                            .take()
+                            .expect("Frame doesn't exist!");
 
-                    let old_scene = rollback_buffer
-                        .tracked_entities
-                        .clone();
-
-                    scene_spawner.despawn_sync(world, old_scene.clone());
-
-                    let len = rollback_buffer.scenes.len();
-
-                    let new_scene = rollback_buffer
-                        .scenes
-                        .get(state % len)
-                        .expect("Couldn't find scene in buffer!")
-                        .as_ref()
-                        .expect("Scene is empty!")
-                        .clone();
-                    
-                    dy_assets.remove(old_scene);
-
-                    drop(rollback_buffer);
-                    drop(dy_assets);
-
-                    scene_spawner.spawn_sync(world, resources, new_scene.clone());
-
-                    let mut rollback_buffer = resources
-                        .get_mut::<RollbackBuffer>()
-                        .expect("Couldn't find RollbackBuffer!");
+                    rollback_buffer
+                        .current_resources = rollback_buffer
+                            .past_resources
+                            .get_mut(target)
+                            .unwrap()
+                            .take()
+                            .expect("Frame doesn't exist!");
 
                     // Setup for catchup
                     rollback_buffer
                         .rollback_state = RollbackState::Rolledback(state);
-
-                    // Perform resource changes last since we'll have to drop everything we were using
-                    let resource_rollback = rollback_buffer.resource_rollback_fn.take().unwrap_or(Vec::new());
-                    let past_resources = rollback_buffer
-                        .resources.get_mut(state % len)
-                        .expect("Couldn't find resources in buffer!")
-                        .take()
-                        .unwrap_or(Resources::default());
-
-                    drop(scene_spawner);
-                    drop(rollback_buffer);
-                    drop(type_registry);
-
-                    for resource_rollback_fn in resource_rollback.iter(){
-                        (resource_rollback_fn)(resources, &past_resources);
-                    }
-
-                    resources
-                        .get_mut::<RollbackBuffer>()
-                        .expect("Couldn't find RollbackBuffer!")
-                        .resource_rollback_fn = Some(resource_rollback);
                 },
                 RollbackState::Rolledback(state) => {
-                    // Apply overrides to state from stored state (for inputs for instance)
-                    let mut rollback_buffer = resources
-                        .get_mut::<RollbackBuffer>()
-                        .expect("Couldn't find RollbackBuffer!");
-
-                    let len = rollback_buffer.scenes.len();
-                    let resource_overrides = rollback_buffer.resource_overrides.take().unwrap_or(Vec::new());
-
-                    let past_resources = rollback_buffer
-                        .resources
-                        .get_mut(state % len)
-                        .expect("Couldn't find resources in buffer!")
-                        .take()
-                        .unwrap_or(Resources::default());
-                    drop(rollback_buffer);
-
-                    for resource_overrides_fn in resource_overrides.iter(){
-                        (resource_overrides_fn)(resources, &past_resources);
-                    }
-                    
-                    let mut rollback_buffer = resources
-                        .get_mut::<RollbackBuffer>()
-                        .expect("Couldn't find RollbackBuffer!");
-
-                    rollback_buffer
-                        .resource_rollback_fn = Some(resource_overrides);
-
-                    // Apply buffered changes for state
-
-                    
-                    let changes = rollback_buffer
-                        .buffered_changes
-                        .remove(&state);
-
-                    drop(rollback_buffer);
-
-                    if let Some(mut changes) = changes{
-                        println!("RUNNING CHANGES");
-                        changes.run_once(world, resources);
-                    }
-
                     // Run schedule for state_n
                     self.run_once(world, resources);
                     
@@ -262,55 +200,6 @@ impl RollbackStage{
                     // Increment counters
                     let new_state = state + 1;
                     rollback_buffer.rollback_state = RollbackState::Rolledback(new_state);
-
-                    let dy_assets = resources
-                        .get::<Assets<DynamicScene>>()
-                        .expect("Couldn't find DynamicScene Assets");
-                
-                    // Store state_n+1
-                    let stored_scene = dy_assets
-                        .get(rollback_buffer.tracked_entities.clone())
-                        .expect("Couldn't find rollback scene!")
-                        .get_scene(resources)
-                        .expect("Couldn't get Scene from DynamicScene!");
-
-
-                    let mut st_assets = resources
-                        .get_mut::<Assets<Scene>>()
-                        .expect("Couldn't find Scene Assets");
-
-                    let stored_scene = st_assets
-                        .add(stored_scene);
-
-                    let old_scene = std::mem::replace(
-                        rollback_buffer
-                            .scenes
-                            .get_mut(state % len)
-                            .expect("Index error in scene buffer!"),
-                            Some(stored_scene)
-                    );
-
-                    if let Some(old_scene) = old_scene{
-                        st_assets.remove(old_scene);
-                    }
-
-                    let mut stored_resources = Resources::default();
-
-                    let resource_rollback = rollback_buffer.resource_rollback_fn.take().unwrap_or(Vec::new());
-                    
-                    drop(rollback_buffer);
-                    drop(st_assets);
-
-                    for resource_rollback_fn in resource_rollback.iter(){
-                        (resource_rollback_fn)(&mut stored_resources, &resources);
-                    }
-
-                    let mut rollback_buffer = resources
-                        .get_mut::<RollbackBuffer>()
-                        .expect("Couldn't find RollbackBuffer!");
-
-                    rollback_buffer
-                        .resource_rollback_fn = Some(resource_rollback);
 
                     if new_state == rollback_buffer.newest_frame{
                         // We're all caugt up!
@@ -352,14 +241,26 @@ impl Stage for RollbackStage{
                 .get_mut::<RollbackBuffer>()
                 .expect("Couldn't find RollbackBuffer!");
 
-            let resource_overrides = rollback_buffer.resource_overrides.take().unwrap_or(Vec::new());
+            let mut scene_spawner = resources
+                .get_mut::<SceneSpawner>()
+                .expect("Couldn't find SceneSpawner!");
+
+            scene_spawner
+                .spawn_dynamic_sync(
+                    world,
+                    resources,
+                    &rollback_buffer.tracked_entities
+                );
+
+            let resource_override_fn = rollback_buffer.resource_override_fn.take().unwrap_or(Vec::new());
 
             let mut past_resources = Resources::default();
 
             drop(rollback_buffer);
+            drop(scene_spawner);
 
-            for resource_overrides_fn in resource_overrides.iter(){
-                (resource_overrides_fn)(&mut past_resources, resources);
+            for resource_override_fn_fn in resource_override_fn.iter(){
+                (resource_override_fn_fn)(&mut past_resources, resources);
             }
             
             let mut rollback_buffer = resources
@@ -367,7 +268,7 @@ impl Stage for RollbackStage{
                 .expect("Couldn't find RollbackBuffer!");
 
             rollback_buffer
-                .resource_rollback_fn = Some(resource_overrides);
+                .resource_rollback_fn = Some(resource_override_fn);
 
         }
 
@@ -421,14 +322,17 @@ pub trait ResourceRollbackFn = Fn(&mut Resources, &Resources) -> () + Sync + Sen
 pub struct RollbackBuffer{
     pub newest_frame: usize,
     rollback_state: RollbackState,
-    tracked_entities: Handle<DynamicScene>,
+
+    current_world: World,
+    current_resources: Resources,
 
     buffered_changes: HashMap<usize, SystemStage>,
-    scenes: Vec<Option<Handle<Scene>>>,
-    resources: Vec<Option<Resources>>,   
 
-    resource_rollback_fn: Option<Vec<Box<dyn ResourceRollbackFn>>>,
-    resource_overrides: Option<Vec<Box<dyn ResourceRollbackFn>>>
+    past_worlds: Vec<Option<World>>,
+    past_resources: Vec<Option<Resources>>,   
+
+    resource_rollback: Vec<Box<dyn ResourceRollbackFn>>,
+    resource_override: Vec<Box<dyn ResourceRollbackFn>>
 }
 
 impl RollbackBuffer{
@@ -436,18 +340,17 @@ impl RollbackBuffer{
         RollbackBuffer{
             newest_frame: 0,
             rollback_state: RollbackState::Rolledback(0),
-            tracked_entities: assets
-                .add(DynamicScene::from_world(
-                    &World::new(),
-                    type_registry
-            )),
+            
+            current_world: World::new(),
+            current_resources: Resources::default(),
 
             buffered_changes: HashMap::new(),
-            scenes: (0..buffer_size).map(|_| None).collect(),
-            resources: (0..buffer_size).map(|_| None).collect(),
 
-            resource_rollback_fn: None,
-            resource_overrides: None
+            past_worlds: (0..buffer_size).map(|_| None).collect(),
+            past_resources: (0..buffer_size).map(|_| None).collect(),
+
+            resource_rollback: Vec::new(),
+            resource_override: Vec::new()
         }
     }
 
@@ -474,42 +377,89 @@ impl RollbackBuffer{
 
 pub struct RollbackTracked;
 
-fn update_tracked_entities(world: &mut World, resources: &mut Resources){
-    let mut scene = DynamicScene::default();
-    let type_registry_arc = resources.get::<TypeRegistryArc>().expect("Couldn't find TypeRegistryArc");
+fn store_new_world(resources: &mut Resources){
+    let rollback_buffer = resources
+        .get_mut::<RollbackBuffer>()
+        .expect("Couldn't find RollbackBuffer!");
+
+    let mut world = &mut rollback_buffer
+        .current_world;
+    
+    let resources = &rollback_buffer
+        .current_resources;
+
+    let mut new_world = World::new();
+    new_world.archetypes = world
+        .archetypes
+        .iter()
+        .map(|arch|{
+            Archetype::with_grow(Vec::from(arch.types()), arch.len())
+        })
+        .collect();
+
+    let type_registry_arc = resources
+        .get::<TypeRegistryArc>()
+        .expect("Couldn't find TypeRegistryArc");
+
     let type_registry = type_registry_arc.read();
 
-    for archetype in world.archetypes().filter(|at| at.has::<RollbackTracked>()){
-        let mut entities = Vec::new();
-        for (index, entity) in archetype.iter_entities().enumerate() {
-            if index == entities.len() {
-                entities.push(bevy::scene::Entity {
-                    entity: entity.id(),
-                    components: Vec::new(),
-                })
-            }
+    for (archetype, new_archetype) in world.archetypes().zip(new_world.archetypes()){
+        for entity in archetype.iter_entities() {
+            // Reserve the new entity in the world then allocate space for it in the Archetype
+            let new_entity = new_world.reserve_entity();
+            new_archetype.allocate(new_entity);
+
+            // Copy over component data to the new entity with the power of friendship
             for type_info in archetype.types() {
                 if let Some(registration) = type_registry.get(type_info.id()) {
                     if let Some(reflect_component) = registration.data::<ReflectComponent>() {
-                        // SAFE: the index comes directly from a currently live component
-                        unsafe {
-                            let component =
-                                reflect_component.reflect_component(&archetype, index);
-                            entities[index].components.push(component.clone_value());
-                        }
+                        reflect_component
+                            .copy_component(
+                                world,
+                                &mut new_world,
+                                resources,
+                                *entity,
+                                new_entity
+                        );
                     }
                 }
             }
         }
-
-        scene.entities.extend(entities.drain(..));
     }
 
-    let mut rollback_buffer = resources.get_mut::<RollbackBuffer>().expect("Couldn't find RollbackBuffer!");
-    let mut scenes = resources.get_mut::<Assets<DynamicScene>>().expect("Couldn't find Dynamic Scene Assets!");
+    // Since new_world is an exact copy of the current_world, we can just store new_world
+    // This should also drop the old world question mark?
+    let buffer_pos = rollback_buffer.newest_frame %
+        rollback_buffer
+            .past_worlds
+            .len();
+    *rollback_buffer
+        .past_worlds
+        .get_mut(buffer_pos)
+        .expect("RollbackBuffer Index is out of bounds!") = Some(new_world);      
+}
 
-    scenes.remove(rollback_buffer.tracked_entities.clone());
-    rollback_buffer.tracked_entities = scenes.add(scene);
+fn store_new_resources(resources: &mut Resources){
+    let rollback_buffer = resources
+        .get_mut::<RollbackBuffer>()
+        .expect("Couldn't find RollbackBuffer!");
+
+    let new_resources = Resources::default();
+
+    for resource_rollback_fn in rollback_buffer.resource_rollback.iter(){
+        (resource_rollback_fn)(&mut new_resources, &rollback_buffer.current_resources);
+    }
+
+    // Since new_resources is an exact copy of the current_resources, we can just store new_resources
+    // This should also drop the old resources question mark?
+    let buffer_pos = rollback_buffer.newest_frame %
+        rollback_buffer
+            .past_resources
+            .len();
+    *rollback_buffer
+        .past_resources
+        .get_mut(buffer_pos)
+        .expect("RollbackBuffer Index is out of bounds!") = Some(new_resources);  
 }
 
 pub trait ResourceTracker{
@@ -523,8 +473,7 @@ impl ResourceTracker for AppBuilder{
             let mut rollback_buffer = self.resources().get_mut::<RollbackBuffer>().expect("Couldn't find RollbackBuffer!");
 
             rollback_buffer
-                .resource_rollback_fn
-                .get_or_insert(Vec::new())
+                .resource_rollback
                 .push(
                     Box::new(|dest_res: &mut Resources, res: &Resources|{
                         dest_res.insert(res.get_cloned::<R>().unwrap());
@@ -539,8 +488,7 @@ impl ResourceTracker for AppBuilder{
             let mut rollback_buffer = self.resources().get_mut::<RollbackBuffer>().expect("Couldn't find RollbackBuffer!");
 
             rollback_buffer
-                .resource_rollback_fn
-                .get_or_insert(Vec::new())
+                .resource_rollback
                 .push(
                 Box::new(|dest_res: &mut Resources, res: &Resources|{
                     dest_res.insert(res.get_cloned::<R>().unwrap());
@@ -548,8 +496,7 @@ impl ResourceTracker for AppBuilder{
             );
 
             rollback_buffer
-                .resource_overrides
-                .get_or_insert(Vec::new())
+                .resource_override
                 .push(
                 Box::new(|dest_res: &mut Resources, res: &Resources|{
                     dest_res.insert(res.get_cloned::<R>().unwrap());
