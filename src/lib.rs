@@ -1,6 +1,7 @@
 #![feature(trait_alias)]
 
 mod res;
+mod query;
 
 use bevy::{
     ecs::{Schedule, Stage, ShouldRun, Archetype},
@@ -17,6 +18,7 @@ use std::collections::hash_map::*;
 use std::any::TypeId;
 
 pub use res::{LRes, LResMut};
+pub use query::{LQuery};
 
 pub mod stage{
     pub const ROLLBACK_UPDATE: &str = "rollback_update";
