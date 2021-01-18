@@ -2,6 +2,7 @@
 
 mod res;
 mod query;
+mod commands;
 
 use bevy::{
     ecs::{Schedule, Stage, ShouldRun, Archetype},
@@ -12,10 +13,10 @@ use bevy::{
     reflect::TypeRegistryArc,
     scene::serde::SceneSerializer,
 };
-use std::sync::Mutex;
 use std::ops::DerefMut;
 use std::collections::hash_map::*;
 use std::any::TypeId;
+use std::sync::{Arc, Mutex};
 
 pub use res::{LRes, LResMut};
 pub use query::{LQuery};
@@ -170,7 +171,7 @@ impl RollbackStage{
 
         let target = state % rollback_buffer.past_resources.len();
 
-        let changes = rollback_buffer.buffered_changes.remove(&state);
+        let changes = rollback_buffer.buffered_changes.lock().unwrap().remove(&state);
 
         let current_world = &mut rollback_buffer.current_world;
         let current_resources = &mut rollback_buffer.current_resources;
@@ -214,6 +215,8 @@ impl RollbackStage{
                 .get::<RollbackBuffer>()
                 .expect("Couldn't find RollbackBuffer!")
                 .rollback_state
+                .lock()
+                .unwrap()
                 .clone();
 
             match current_state{
@@ -245,8 +248,10 @@ impl RollbackStage{
                             .expect("Frame doesn't exist!");
 
                     // Setup for catchup
-                    rollback_buffer
-                        .rollback_state = RollbackState::Rolledback(state);
+                    *rollback_buffer
+                        .rollback_state
+                        .lock()
+                        .unwrap() = RollbackState::Rolledback(state);
                 },
                 RollbackState::Rolledback(state) => {
                     // Run schedule for state_n
@@ -260,11 +265,11 @@ impl RollbackStage{
                     // Increment counters
                     match state{
                         state if state >= rollback_buffer.newest_frame =>{
-                            rollback_buffer.rollback_state = RollbackState::Rolledback(state + 1);
+                            *rollback_buffer.rollback_state.lock().unwrap() = RollbackState::Rolledback(state + 1);
                             // We're all caugt up!
                             break;
                         }
-                        _ => rollback_buffer.rollback_state = RollbackState::Rolledback(state + 1),
+                        _ => *rollback_buffer.rollback_state.lock().unwrap() = RollbackState::Rolledback(state + 1),
                     }
                 }
             };
@@ -352,12 +357,12 @@ pub trait ResourceRollbackFn = Fn(&mut Resources, &Resources) -> () + Sync + Sen
 
 pub struct RollbackBuffer{
     pub newest_frame: usize,
-    rollback_state: RollbackState,
+    rollback_state: Arc<Mutex<RollbackState>>,
 
     pub(crate) current_world: World,
     pub(crate) current_resources: Resources,
 
-    buffered_changes: HashMap<usize, SystemStage>,
+    buffered_changes: Arc<Mutex<HashMap<usize, SystemStage>>>,
 
     past_worlds: Vec<Option<World>>,
     past_resources: Vec<Option<Resources>>,   
@@ -370,12 +375,12 @@ impl RollbackBuffer{
     pub fn new(buffer_size: usize) -> Self{
         RollbackBuffer{
             newest_frame: 0,
-            rollback_state: RollbackState::Rolledback(0),
+            rollback_state: Arc::new(Mutex::new(RollbackState::Rolledback(0))),
             
             current_world: World::new(),
             current_resources: Resources::default(),
 
-            buffered_changes: HashMap::new(),
+            buffered_changes: Arc::new(Mutex::new(HashMap::new())),
 
             past_worlds: (0..buffer_size).map(|_| None).collect(),
             past_resources: (0..buffer_size).map(|_| None).collect(),
@@ -385,11 +390,11 @@ impl RollbackBuffer{
         }
     }
 
-    pub fn past_frame_change<S: System<In = (), Out = ()>>(&mut self, frame: usize, op: S) -> Result<(), RollbackError>{
+    pub fn past_frame_change<S: System<In = (), Out = ()>>(&self, frame: usize, op: S) -> Result<(), RollbackError>{
         if self.newest_frame - frame >= self.past_worlds.len(){
             return Err(RollbackError::FrameTimeout);
         }
-        match self.buffered_changes.entry(frame){
+        match self.buffered_changes.lock().unwrap().entry(frame){
             Entry::Occupied(mut o) => o.get_mut().add_system(op),
             Entry::Vacant(v) => v.insert({
                 let mut stage = SystemStage::parallel();
@@ -397,7 +402,8 @@ impl RollbackBuffer{
                 stage
             }),
         };
-        self.rollback_state = match self.rollback_state{
+        let mut rollback_state = self.rollback_state.lock().unwrap();
+        *rollback_state = match *rollback_state{
             RollbackState::Rolledback(cur) => RollbackState::Rollback(frame),
             RollbackState::Rollback(cur) if frame < cur => RollbackState::Rollback(frame),
             RollbackState::Rollback(cur) => RollbackState::Rollback(cur),
