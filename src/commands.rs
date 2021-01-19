@@ -3,14 +3,15 @@ use bevy::ecs::{Command, DynamicBundle, EntityReserver, SystemId, SystemStage, S
 use crate::RollbackBuffer;
 use std::ops::DerefMut;
 use std::sync::atomic::Ordering;
-use std::sync::{Mutex, Arc};
+use std::sync::{Arc};
+use parking_lot::Mutex;
 use std::any::TypeId;
 
-pub struct LogicCommands{
-    commands: Commands,
+pub struct LogicCommands<'a>{
+    commands: &'a mut Commands,
 }
 
-impl LogicCommands {
+impl<'a> LogicCommands<'a> {
     pub fn spawn(&mut self, bundle: impl DynamicBundle + Send + Sync + 'static) -> &mut Self {
         self.commands.spawn(bundle);
         self
@@ -157,12 +158,12 @@ impl LogicCommands {
 
 pub struct FetchLogicCommands;
 
-impl<'a> SystemParam for &'a mut LogicCommands {
+impl<'a> SystemParam for &'a mut LogicCommands<'a> {
     type Fetch = FetchLogicCommands;
 }
 
 impl<'a> FetchSystemParam<'a> for FetchLogicCommands {
-    type Item = &'a mut LogicCommands;
+    type Item = LogicCommands<'a>;
 
     fn init(system_state: &mut SystemState, world: &World, _resources: &mut Resources) {
         // SAFE: this is called with unique access to SystemState
@@ -177,44 +178,17 @@ impl<'a> FetchSystemParam<'a> for FetchLogicCommands {
         _world: &'a World,
         _resources: &'a Resources,
     ) -> Option<Self::Item> {
-        Some(&mut *system_state.commands.get())
-    }
-}
-
-pub struct FetchArcLogicCommands;
-impl SystemParam for Arc<Mutex<LogicCommands>> {
-    type Fetch = FetchArcLogicCommands;
-}
-
-impl<'a> FetchSystemParam<'a> for FetchArcLogicCommands {
-    type Item = Arc<Mutex<LogicCommands>>;
-
-    fn init(system_state: &mut SystemState, world: &World, resources: &mut Resources) {
-        if system_state.resource_access.is_write(&TypeId::of::<RollbackBuffer>()){
-            panic!(
-                "System '{}' is trying to access Logical Resources while mutating the RollbackBuffer!",
-                system_state.name
-            );
-        };
-
-        let rollback_buffer = resources
-            .get::<RollbackBuffer>()
-            .expect("Couldn't find RollbackBuffer");
-
-        system_state.other_commands.get_or_insert(Vec::new());
-        system_state.other_commands.push({
-            let mut commands = LogicCommands::default();
-            commands.set_entity_reserver(rollback_buffer.current_world.get_entity_reserver());
-            Arc::new(Mutex::new(commands))
-        });
-    }
-
-    #[inline]
-    unsafe fn get_param(
-        system_state: &SystemState,
-        _world: &World,
-        _resources: &Resources,
-    ) -> Option<Self::Item> {
-        Some(system_state.other_commands.get(system_state.other_commands_init.fetch_add(0, Ordering::SeqCst)))
+        Some(LogicCommands{
+            commands:
+            &mut *system_state
+            .other_commands
+            .as_ref()
+            .unwrap()
+            .get_mut(system_state
+                .other_commands_init
+                .fetch_add(0, Ordering::SeqCst) as usize)
+            .unwrap()
+            .lock()
+        })
     }
 }
