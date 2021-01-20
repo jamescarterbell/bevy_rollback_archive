@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex};
 
 pub use res::{LRes, LResMut};
 pub use query::{LQuery};
+pub use commands::{LogicCommands, LogicCommandsBuilder};
 
 pub mod stage{
     pub const ROLLBACK_UPDATE: &str = "rollback_update";
@@ -409,6 +410,10 @@ impl RollbackBuffer{
             RollbackState::Rollback(cur) => RollbackState::Rollback(cur),
         };
         Ok(())
+    }
+
+    pub fn get_logic_commands_builder(&self) -> LogicCommandsBuilder{
+        LogicCommandsBuilder::new(self)
     }
 }
 
