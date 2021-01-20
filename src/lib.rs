@@ -158,7 +158,7 @@ impl RollbackStage{
         }
     }
 
-    pub fn run_once(&mut self, world: &mut World, resources: &mut Resources, state: usize){
+    pub fn run_once(&mut self, world: &mut World, resources: &mut Resources, state: usize, real_time: bool){
         let mut rollback_buffer_r = resources
                 .get_mut::<RollbackBuffer>()
                 .expect("Couldn't find RollbackBuffer!");
@@ -172,6 +172,15 @@ impl RollbackStage{
         let current_world = &mut rollback_buffer.current_world;
         let current_resources = &mut rollback_buffer.current_resources;
 
+        // Apply overrides
+        if !real_time{
+            if let Some(past_world) = rollback_buffer.past_resources.get(target).unwrap().as_ref(){
+                for override_fn in rollback_buffer.resource_override.iter(){
+                    (override_fn)(current_resources, past_world);
+                }
+            }
+        }
+
         // Apply changes
         if let Some(mut changes) = changes{
             changes.run_once(
@@ -180,10 +189,8 @@ impl RollbackStage{
             );
         }
 
-        // Apply overrides
-        for override_fn in rollback_buffer.resource_override.iter(){
-            (override_fn)(&mut rollback_buffer.current_resources, rollback_buffer.past_resources.get(target).unwrap().as_ref().unwrap());
-        }
+        // Run the schedule
+        self.schedule.run_once(&mut rollback_buffer.current_world, &mut rollback_buffer.current_resources);
         
         drop(rollback_buffer);
         drop(rollback_buffer_r);
@@ -191,20 +198,10 @@ impl RollbackStage{
         // Store everything
         store_new_resources(resources, state + 1);
         store_new_world(resources, state + 1);
-
-        let mut rollback_buffer_r = resources
-                .get_mut::<RollbackBuffer>()
-                .expect("Couldn't find RollbackBuffer!");
-                
-        let mut rollback_buffer = rollback_buffer_r   
-            .deref_mut();
-
-        // Run the schedule
-        self.schedule.run_once(&mut rollback_buffer.current_world, &mut rollback_buffer.current_resources);
-        
     }
 
     pub fn run_rollback(&mut self, world: &mut World, resources: &mut Resources){
+        let mut real_time = true;
         loop{
             
             let current_state = resources
@@ -217,12 +214,13 @@ impl RollbackStage{
 
             match current_state{
                 RollbackState::Rollback(state) => {
+                    real_time = false;
                     // Literally just swap the worlds
                     let mut rollback_buffer = resources
                         .get_mut::<RollbackBuffer>()
                         .expect("Couldn't find RollbackBuffer!");
 
-                    let target = rollback_buffer.newest_frame % 
+                    let target = state % 
                         rollback_buffer
                             .past_worlds
                             .len();
@@ -251,8 +249,7 @@ impl RollbackStage{
                 },
                 RollbackState::Rolledback(state) => {
                     // Run schedule for state_n
-                    self.run_once(world, resources, state);
-                    
+                    self.run_once(world, resources, state, real_time);
                     let mut rollback_buffer = resources
                         .get_mut::<RollbackBuffer>()
                         .expect("Couldn't find RollbackBuffer!");
@@ -457,7 +454,7 @@ fn store_new_world(resources: &mut Resources, state: usize){
                             .add_component(
                                 &mut new_world,
                                 resources,
-                                *entity,
+                                new_entity,
                                 comp
                         );
                     }
