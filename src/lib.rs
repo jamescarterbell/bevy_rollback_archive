@@ -67,7 +67,39 @@ impl Plugin for RollbackPlugin{
         let rollback_buffer = RollbackBuffer::new(
             self.buffer_size
         );
-        
+
+        {
+            let mut registry = rollback_buffer.logic_registry.write();
+            registry.register::<bool>();
+            registry.register::<u8>();
+            registry.register::<u16>();
+            registry.register::<u32>();
+            registry.register::<u64>();
+            registry.register::<u128>();
+            registry.register::<usize>();
+            registry.register::<i8>();
+            registry.register::<i16>();
+            registry.register::<i32>();
+            registry.register::<i64>();
+            registry.register::<i128>();
+            registry.register::<isize>();
+            registry.register::<f32>();
+            registry.register::<f64>();
+            registry.register::<String>();
+            #[cfg(feature = "glam")]
+            {
+                registry.register::<glam::Vec2>();
+                registry.register::<glam::Vec3>();
+                registry.register::<glam::Vec4>();
+                registry.register::<glam::Mat3>();
+                registry.register::<glam::Mat4>();
+                registry.register::<glam::Quat>();
+            }
+            #[cfg(feature = "bevy_ecs")]
+            {
+                registry.register::<bevy_ecs::Entity>();
+            }
+        }
 
         let run_criteria = self.run_criteria.lock().unwrap().take();
 
@@ -94,43 +126,6 @@ impl Plugin for RollbackPlugin{
                 stage::ROLLBACK_UPDATE,
                 stage
             );
-
-            
-
-        let mut type_arc = TypeRegistryArc::default();
-        let mut registry = type_arc.write();
-        registry.register::<bool>();
-        registry.register::<u8>();
-        registry.register::<u16>();
-        registry.register::<u32>();
-        registry.register::<u64>();
-        registry.register::<u128>();
-        registry.register::<usize>();
-        registry.register::<i8>();
-        registry.register::<i16>();
-        registry.register::<i32>();
-        registry.register::<i64>();
-        registry.register::<i128>();
-        registry.register::<isize>();
-        registry.register::<f32>();
-        registry.register::<f64>();
-        registry.register::<String>();
-        #[cfg(feature = "glam")]
-        {
-            registry.register::<glam::Vec2>();
-            registry.register::<glam::Vec3>();
-            registry.register::<glam::Vec4>();
-            registry.register::<glam::Mat3>();
-            registry.register::<glam::Mat4>();
-            registry.register::<glam::Quat>();
-        }
-        #[cfg(feature = "bevy_ecs")]
-        {
-            registry.register::<bevy_ecs::Entity>();
-        }
-        drop(registry);
-
-        app.track_resource(type_arc);
     }
 }
 
@@ -256,7 +251,6 @@ impl RollbackStage{
                 },
                 RollbackState::Rolledback(state) => {
                     // Run schedule for state_n
-                    println!("{}", state);
                     self.run_once(world, resources, state);
                     
                     let mut rollback_buffer = resources
@@ -369,7 +363,9 @@ pub struct RollbackBuffer{
     past_resources: Vec<Option<Resources>>,   
 
     resource_rollback: Vec<Box<dyn ResourceRollbackFn>>,
-    resource_override: Vec<Box<dyn ResourceRollbackFn>>
+    resource_override: Vec<Box<dyn ResourceRollbackFn>>,
+
+    pub logic_registry: TypeRegistryArc,
 }
 
 impl RollbackBuffer{
@@ -387,7 +383,9 @@ impl RollbackBuffer{
             past_resources: (0..buffer_size).map(|_| None).collect(),
 
             resource_rollback: Vec::new(),
-            resource_override: Vec::new()
+            resource_override: Vec::new(),
+
+            logic_registry: TypeRegistryArc::default(),
         }
     }
 
@@ -426,7 +424,7 @@ fn store_new_world(resources: &mut Resources, state: usize){
                 
         let mut rollback_buffer = rollback_buffer_r   
             .deref_mut();
-
+        
     let mut world = &mut rollback_buffer
         .current_world;
     
@@ -434,46 +432,39 @@ fn store_new_world(resources: &mut Resources, state: usize){
         .current_resources;
 
     let mut new_world = World::new();
-    let mut new_archetypes: Vec<Archetype> = world
-        .archetypes
-        .iter()
-        .map(|arch|{
-            Archetype::with_grow(Vec::from(arch.types()), arch.len())
-        })
-        .collect();
-
-    let type_registry_arc = resources
-        .get::<TypeRegistryArc>()
-        .expect("Couldn't find TypeRegistryArc");
-
-    let type_registry = type_registry_arc.read();
 
 
-    for (archetype, new_archetype) in world.archetypes().zip(new_archetypes.as_mut_slice().iter_mut()){
-        for entity in archetype.iter_entities() {
+    let type_registry = rollback_buffer.logic_registry.read();
+
+
+    for archetype in world.archetypes(){
+        for (index, entity) in archetype.iter_entities().enumerate() {
             // Reserve the new entity in the world then allocate space for it in the Archetype
             let new_entity = new_world.reserve_entity();
-            unsafe{ new_archetype.allocate(new_entity); }
 
             // Copy over component data to the new entity with the power of friendship
             for type_info in archetype.types() {
                 if let Some(registration) = type_registry.get(type_info.id()) {
                     if let Some(reflect_component) = registration.data::<ReflectComponent>() {
+                        let comp = unsafe{
+                            reflect_component
+                                .reflect_component(
+                                    archetype,
+                                    index
+                                )
+                        };
                         reflect_component
-                            .copy_component(
-                                world,
+                            .add_component(
                                 &mut new_world,
                                 resources,
                                 *entity,
-                                new_entity
+                                comp
                         );
                     }
                 }
             }
         }
     }
-
-    new_world.archetypes = new_archetypes;
 
     let buffer_pos = state %
         rollback_buffer
