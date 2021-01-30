@@ -128,7 +128,7 @@ impl Plugin for RollbackPlugin{
             );
     }
 }
-
+struct Dumb;
 pub struct RollbackStage{
     schedule: Schedule,
     initialized: bool,
@@ -174,9 +174,9 @@ impl RollbackStage{
 
         // Apply overrides
         if !real_time{
-            if let Some(past_world) = rollback_buffer.past_resources.get(target).unwrap().as_ref(){
+            if let Some(past_resources) = rollback_buffer.past_resources.get(target).unwrap().as_ref(){
                 for override_fn in rollback_buffer.resource_override.iter(){
-                    (override_fn)(current_resources, past_world);
+                    (override_fn)(current_resources, past_resources);
                 }
             }
         }
@@ -190,7 +190,13 @@ impl RollbackStage{
         }
 
         // Run the schedule
-        self.schedule.run_once(&mut rollback_buffer.current_world, &mut rollback_buffer.current_resources);
+        println!("GONNA RUN");
+        self.schedule.initialize_and_run(&mut rollback_buffer.current_world, &mut rollback_buffer.current_resources);
+        rollback_buffer.current_world.clear_trackers();
+        rollback_buffer.current_resources.clear_trackers();
+        
+
+        println!("FINISHED RUNNING");
         
         drop(rollback_buffer);
         drop(rollback_buffer_r);
@@ -371,7 +377,7 @@ impl RollbackBuffer{
             newest_frame: 0,
             rollback_state: Arc::new(Mutex::new(RollbackState::Rolledback(0))),
             
-            current_world: World::new(),
+            current_world: World::default(),
             current_resources: Resources::default(),
 
             buffered_changes: Arc::new(Mutex::new(HashMap::new())),
